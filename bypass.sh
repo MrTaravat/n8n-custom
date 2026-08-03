@@ -133,7 +133,7 @@ sed -i 's/return this\.getValue(LICENSE_QUOTAS\.TEAM_PROJECT_LIMIT) ?? 0;/return
 perl -0777 -pi -e 's/(getWorkflowHistoryPruneLimit\(\) \{).*?(\n\t\})/$1\n\t\treturn UNLIMITED_LICENSE_QUOTA;$2/s' "$LICENSE_FILE"
 
 # Replace plan name
-sed -i 's/return this\.getValue(\x27planName\x27) ?? \x27Community\x27;/return this.getValue(\x27planName\x27) ?? \x27FavaVersionked\x27;/' "$LICENSE_FILE"
+sed -i 's/return this\.getValue(\x27planName\x27) ?? \x27Community\x27;/return this.getValue(\x27planName\x27) ?? \x27FavaVersion\x27;/' "$LICENSE_FILE"
 
 echo -e "${GREEN}✓ Applied license bypass to $LICENSE_FILE${NC}"
 verify "license.ts: renewal warning rebranded" "$LICENSE_FILE" 'LICENSE_RENEWAL_DISABLED_WARNING = \x27Enterprise Edition\x27;'
@@ -143,7 +143,7 @@ verify "license.ts: isAPIDisabled() returns false" "$LICENSE_FILE" 'isAPIDisable
 verify "license.ts: users quota unlimited" "$LICENSE_FILE" 'getUsersLimit\(\) \{\s*return UNLIMITED_LICENSE_QUOTA;'
 verify "license.ts: workflow history prune unlimited" "$LICENSE_FILE" 'getWorkflowHistoryPruneLimit\(\) \{\s*return UNLIMITED_LICENSE_QUOTA;'
 verify "license.ts: team project limit raised" "$LICENSE_FILE" 'return 999;'
-verify "license.ts: plan name replaced" "$LICENSE_FILE" '\x27FavaVersionked\x27'
+verify "license.ts: plan name replaced" "$LICENSE_FILE" '\x27FavaVersion\x27'
 
 # ---------------------------------------------------------------------------
 # packages/@n8n/backend-common/src/license-state.ts (the live code path)

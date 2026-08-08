@@ -265,7 +265,7 @@ jobs:
 
     - name: Push and Release to Heroku
       env:
-        HEROKU_APP_NAME: "n8n-me"
+        HEROKU_APP_NAME: "n8n-me-auto"
       run: |
         docker tag "$LOCAL_IMAGE" "registry.heroku.com/$HEROKU_APP_NAME/web"
         docker push "registry.heroku.com/$HEROKU_APP_NAME/web"

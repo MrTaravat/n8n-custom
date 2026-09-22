@@ -20,7 +20,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: mroplus/n8n
+  IMAGE_NAME: mrtaravat/n8n-custom
   IMAGE_TAG: enterprise
   # Deterministic local name for the image produced by `pnpm run build:docker`.
   # dockerize-n8n.mjs honours IMAGE_BASE_NAME/IMAGE_TAG, and only pushes directly

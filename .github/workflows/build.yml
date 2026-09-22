@@ -12,7 +12,7 @@ on:
         type: string
         default: ''
   schedule:
-    - cron: '0 0 * * *'  # Run every day at midnight UTC
+    - cron: '0 0 * * 0'  # Run every Sunday at midnight UTC
 
 permissions:
   contents: read
@@ -20,8 +20,13 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: mrtaravat/n8n
+  IMAGE_NAME: mroplus/n8n
   IMAGE_TAG: enterprise
+  # Deterministic local name for the image produced by `pnpm run build:docker`.
+  # dockerize-n8n.mjs honours IMAGE_BASE_NAME/IMAGE_TAG, and only pushes directly
+  # to a registry when the name has a registry host in it -- a two-segment name
+  # like this one is `--load`ed into the local daemon instead, which is what the
+  # tag-and-push step below needs.
   LOCAL_IMAGE: n8nio/n8n:build
 
 jobs:
@@ -38,7 +43,7 @@ jobs:
 
     steps:
     - name: Checkout current repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Resolve n8n version to build
       id: get_version
@@ -51,6 +56,12 @@ jobs:
         if [ -n "$TAG_OVERRIDE" ]; then
           latest_stable_tag="$TAG_OVERRIDE"
         else
+          # Upstream publishes moving `stable` and `beta` releases alongside the
+          # immutable `n8n@X.Y.Z` ones. `stable` is not a prerelease and is
+          # republished on every stable cut, so it always sorts first -- taking the
+          # first non-prerelease entry silently pinned this workflow to a tag that
+          # never changes value, and every run after the first skipped the build.
+          # Only immutable semver tags are acceptable here.
           latest_stable_tag=$(gh api 'repos/n8n-io/n8n/releases?per_page=100' \
             --jq '.[] | select(.prerelease == false) | .tag_name' \
             | grep -E '^n8n@[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -64,6 +75,9 @@ jobs:
           exit 1
         fi
 
+        # The skip check must account for the bypass patches too, otherwise editing
+        # bypass.sh can never produce a new image: the n8n version is unchanged, so
+        # the version tag already exists and the build is skipped forever.
         bypass_hash=$(sha256sum bypass.sh | cut -c1-12)
         build_key="${version_number}-b${bypass_hash}"
 
@@ -73,8 +87,12 @@ jobs:
           echo "build_key=$build_key"
         } >> "$GITHUB_OUTPUT"
 
+        echo "n8n tag:    $latest_stable_tag"
+        echo "Version:    $version_number"
+        echo "Build key:  $build_key"
+
     - name: Log in to Container Registry
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
@@ -89,10 +107,13 @@ jobs:
         set -euo pipefail
 
         if [ "$FORCE_BUILD" = "true" ]; then
+          echo "🔁 force_build requested, building regardless of registry state"
           echo "should_build=true" >> "$GITHUB_OUTPUT"
         elif docker manifest inspect "$REGISTRY/$IMAGE_NAME:$BUILD_KEY" >/dev/null 2>&1; then
+          echo "✅ $BUILD_KEY already exists in the registry, nothing to do"
           echo "should_build=false" >> "$GITHUB_OUTPUT"
         else
+          echo "🆕 $BUILD_KEY not found in the registry, will build"
           echo "should_build=true" >> "$GITHUB_OUTPUT"
         fi
 
@@ -106,19 +127,8 @@ jobs:
       packages: write
 
     steps:
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: true
-        
     - name: Checkout current repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Clone n8n repository
       env:
@@ -126,36 +136,37 @@ jobs:
       run: |
         set -euo pipefail
         git clone --depth 1 --branch "$N8N_TAG" https://github.com/n8n-io/n8n.git n8n-source
+
         n8n_commit_hash=$(git -C n8n-source rev-parse HEAD)
+        echo "Cloned n8n at $N8N_TAG ($n8n_commit_hash)"
         echo "N8N_COMMIT_HASH=$n8n_commit_hash" >> "$GITHUB_ENV"
 
     - name: Copy bypass script to n8n repository
       run: |
         set -euo pipefail
+        # Hard failure: without the bypass, the build would still succeed and
+        # publish a stock n8n image under the `enterprise` tag.
+        if [ ! -f bypass.sh ]; then
+          echo "::error title=Missing bypass.sh::bypass.sh not found; refusing to publish an unpatched image"
+          exit 1
+        fi
         cp bypass.sh n8n-source/
+        echo "bypass.sh copied to n8n-source"
 
     - name: Setup Node.js
-      uses: actions/setup-node@v4
-      env:
-        ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+      uses: actions/setup-node@v7
       with:
-        node-version: '20'
+        node-version: '24'
 
     - name: Install pnpm
-      uses: pnpm/action-setup@v4
+      uses: pnpm/action-setup@v6
       with:
-        version: latest
-
-    - name: Get pnpm store directory
-      run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-
-    - name: Setup pnpm cache
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.STORE_PATH }}
-        key: ${{ runner.os }}-pnpm-store-${{ hashFiles('n8n-source/pnpm-lock.yaml') }}
-        restore-keys: |
-          ${{ runner.os }}-pnpm-store-
+        # Deliberately NOT `version: latest`. n8n pins `packageManager` (pnpm
+        # 11.25.0 as of n8n@2.39.8) and pnpm 12 made `pnpm deploy` reject
+        # ambiguous peer resolutions (ERR_PNPM_DEPLOY_AMBIGUOUS_PEER), which
+        # breaks the `pnpm run build:docker` step. Reading the version out of
+        # the cloned source keeps us on whatever upstream tests against.
+        package_json_file: n8n-source/package.json
 
     - name: Install dependencies
       working-directory: n8n-source
@@ -167,16 +178,21 @@ jobs:
         set -euo pipefail
         sed -i 's/\r$//' bypass.sh
         chmod +x bypass.sh
+        # bypass.sh verifies each patch and exits non-zero if any of them drifted.
         ./bypass.sh --auto
 
     - name: Build n8n
       working-directory: n8n-source
-      run: |
-        echo "inject-workspace-packages=true" >> .npmrc
-        pnpm run build
+      run: pnpm run build
+
+    # No setup-buildx-action on purpose. It would create a `docker-container`
+    # driver builder, which sends dockerize-n8n.mjs down the
+    # `docker buildx build --load` path. The runner's default builder uses the
+    # `docker` driver, so the script takes the plain `docker build` path instead
+    # and the image lands in the local daemon for the tag-and-push step below.
 
     - name: Log in to Container Registry
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
@@ -185,6 +201,9 @@ jobs:
     - name: Build Docker image
       working-directory: n8n-source
       env:
+        # Read by n8n's scripts/dockerize-n8n.mjs. IMAGE_TAG deliberately shadows
+        # the workflow-level `enterprise` value for this step only; the GHCR tags
+        # are applied by the next step.
         CONTAINER_ENGINE: docker
         IMAGE_BASE_NAME: n8nio/n8n
         IMAGE_TAG: build
@@ -196,6 +215,13 @@ jobs:
         BUILD_KEY: ${{ needs.check-version.outputs.build_key }}
       run: |
         set -euo pipefail
+
+        if ! docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
+          echo "::error title=Image not found::build:docker did not produce $LOCAL_IMAGE"
+          docker images
+          exit 1
+        fi
+
         tags=(
           "$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
           "$REGISTRY/$IMAGE_NAME:latest"
@@ -204,25 +230,15 @@ jobs:
           "$REGISTRY/$IMAGE_NAME:$GITHUB_SHA"
           "$REGISTRY/$IMAGE_NAME:n8n-$N8N_COMMIT_HASH"
         )
+
         for tag in "${tags[@]}"; do
+          echo "Tagging and pushing $tag"
           docker tag "$LOCAL_IMAGE" "$tag"
           docker push "$tag"
         done
 
+        echo "Successfully pushed n8n $N8N_VERSION to GHCR"
+
     - name: Clean up
       if: always()
       run: docker system prune -f
-      
-    - name: Login to Heroku Container Registry
-      env:
-        HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
-      run: echo $HEROKU_API_KEY | docker login -u _ --password-stdin registry.heroku.com
-
-    - name: Push and Release to Heroku
-      env:
-        HEROKU_APP_NAME: "n8n-me-auto"
-      run: |
-        docker tag "$LOCAL_IMAGE" "registry.heroku.com/$HEROKU_APP_NAME/web"
-        docker push "registry.heroku.com/$HEROKU_APP_NAME/web"
-        curl https://cli-assets.heroku.com/install.sh | sh
-        HEROKU_API_KEY=${{ secrets.HEROKU_API_KEY }} heroku container:release web -a "$HEROKU_APP_NAME"

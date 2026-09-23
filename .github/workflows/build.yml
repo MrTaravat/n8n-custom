@@ -152,6 +152,8 @@ jobs:
 
     - name: Install dependencies
       working-directory: n8n-source
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: pnpm install --frozen-lockfile
 
     - name: Run bypass script

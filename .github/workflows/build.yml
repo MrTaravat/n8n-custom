@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
       n8n_tag:
-        description: 'n8n release tag to build (e.g. n8n@2.32.7). Leave empty for the latest stable release.'
+        description: 'n8n release tag to build (e.g. n8n@2.40.5). Leave empty for the latest stable release.'
         type: string
         default: ''
   schedule:
@@ -20,7 +20,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  # با این متغیر، همیشه نام کاربری توکن گیت‌هاب خودت (مثلاً mrtaravat) جایگزین می‌شود
+  # تخصیص خودکار نام کاربری گیت‌هاب شما برای جلوگیری از ارور دسترسی
   IMAGE_NAME: ${{ github.repository }}
   IMAGE_TAG: enterprise
   LOCAL_IMAGE: n8nio/n8n:build
@@ -51,7 +51,7 @@ jobs:
         if [ -n "$TAG_OVERRIDE" ]; then
           latest_stable_tag="$TAG_OVERRIDE"
         else
-          # دریافت قطعی و ۱۰۰٪ درستِ آخرین نسخه منتشر شده مستقیماً از مخزن رسمی npm
+          # دریافت قطعی جدیدترین نسخه مستقیماً از رجیستری npm
           latest_version=$(npm show n8n version)
           latest_stable_tag="n8n@${latest_version}"
         fi
@@ -72,10 +72,6 @@ jobs:
           echo "build_key=$build_key"
         } >> "$GITHUB_OUTPUT"
 
-        echo "n8n tag:    $latest_stable_tag"
-        echo "Version:    $version_number"
-        echo "Build key:  $build_key"
-
     - name: Log in to Container Registry
       uses: docker/login-action@v3
       with:
@@ -92,13 +88,10 @@ jobs:
         set -euo pipefail
 
         if [ "$FORCE_BUILD" = "true" ]; then
-          echo "🔁 force_build requested, building regardless of registry state"
           echo "should_build=true" >> "$GITHUB_OUTPUT"
         elif docker manifest inspect "$REGISTRY/$IMAGE_NAME:$BUILD_KEY" >/dev/null 2>&1; then
-          echo "✅ $BUILD_KEY already exists in the registry, nothing to do"
           echo "should_build=false" >> "$GITHUB_OUTPUT"
         else
-          echo "🆕 $BUILD_KEY not found in the registry, will build"
           echo "should_build=true" >> "$GITHUB_OUTPUT"
         fi
 
@@ -132,9 +125,7 @@ jobs:
       run: |
         set -euo pipefail
         git clone --depth 1 --branch "$N8N_TAG" https://github.com/n8n-io/n8n.git n8n-source
-
         n8n_commit_hash=$(git -C n8n-source rev-parse HEAD)
-        echo "Cloned n8n at $N8N_TAG ($n8n_commit_hash)"
         echo "N8N_COMMIT_HASH=$n8n_commit_hash" >> "$GITHUB_ENV"
 
     - name: Copy bypass script to n8n repository
@@ -150,11 +141,13 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
+        # قفل شدن روی این نسخه برای جلوگیری از کرش کردن isolated-vm
         node-version: '20.18.3'
 
     - name: Install pnpm
       uses: pnpm/action-setup@v4
       with:
+        # خواندن نسخه pnpm از سورس n8n برای جلوگیری از ارورهای pnpm v12
         package_json_file: n8n-source/package.json
 
     - name: Install dependencies
@@ -171,9 +164,7 @@ jobs:
 
     - name: Build n8n
       working-directory: n8n-source
-      run: |
-        echo "inject-workspace-packages=true" >> .npmrc
-        pnpm run build
+      run: pnpm run build
 
     - name: Log in to Container Registry
       uses: docker/login-action@v3
@@ -199,7 +190,6 @@ jobs:
 
         if ! docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
           echo "::error title=Image not found::build:docker did not produce $LOCAL_IMAGE"
-          docker images
           exit 1
         fi
 
@@ -213,12 +203,9 @@ jobs:
         )
 
         for tag in "${tags[@]}"; do
-          echo "Tagging and pushing $tag"
           docker tag "$LOCAL_IMAGE" "$tag"
           docker push "$tag"
         done
-
-        echo "Successfully pushed n8n $N8N_VERSION to GHCR"
 
     - name: Clean up
       if: always()

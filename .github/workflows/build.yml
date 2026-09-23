@@ -12,7 +12,7 @@ on:
         type: string
         default: ''
   schedule:
-    - cron: '0 0 * * 0'  # Run every Sunday at midnight UTC
+    - cron: '0 0 * * *'  # Run every day at midnight UTC
 
 permissions:
   contents: read
@@ -20,13 +20,9 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: mrtaravat/n8n-custom
+  # با این متغیر، همیشه نام کاربری توکن گیت‌هاب خودت (مثلاً mrtaravat) جایگزین می‌شود
+  IMAGE_NAME: ${{ github.repository }}
   IMAGE_TAG: enterprise
-  # Deterministic local name for the image produced by `pnpm run build:docker`.
-  # dockerize-n8n.mjs honours IMAGE_BASE_NAME/IMAGE_TAG, and only pushes directly
-  # to a registry when the name has a registry host in it -- a two-segment name
-  # like this one is `--load`ed into the local daemon instead, which is what the
-  # tag-and-push step below needs.
   LOCAL_IMAGE: n8nio/n8n:build
 
 jobs:
@@ -43,12 +39,11 @@ jobs:
 
     steps:
     - name: Checkout current repository
-      uses: actions/checkout@v7
+      uses: actions/checkout@v4
 
     - name: Resolve n8n version to build
       id: get_version
       env:
-        GH_TOKEN: ${{ github.token }}
         TAG_OVERRIDE: ${{ inputs.n8n_tag }}
       run: |
         set -euo pipefail
@@ -56,17 +51,9 @@ jobs:
         if [ -n "$TAG_OVERRIDE" ]; then
           latest_stable_tag="$TAG_OVERRIDE"
         else
-          # Upstream publishes moving `stable` and `beta` releases alongside the
-          # immutable `n8n@X.Y.Z` ones. `stable` is not a prerelease and is
-          # republished on every stable cut, so it always sorts first -- taking the
-          # first non-prerelease entry silently pinned this workflow to a tag that
-          # never changes value, and every run after the first skipped the build.
-          # Only immutable semver tags are acceptable here.
-          latest_stable_tag=$(gh api 'repos/n8n-io/n8n/releases?per_page=100' \
-            --jq '.[] | select(.prerelease == false) | .tag_name' \
-            | grep -E '^n8n@[0-9]+\.[0-9]+\.[0-9]+$' \
-            | sort -V \
-            | tail -n 1)
+          # دریافت قطعی و ۱۰۰٪ درستِ آخرین نسخه منتشر شده مستقیماً از مخزن رسمی npm
+          latest_version=$(npm show n8n version)
+          latest_stable_tag="n8n@${latest_version}"
         fi
 
         version_number="${latest_stable_tag#n8n@}"
@@ -76,9 +63,6 @@ jobs:
           exit 1
         fi
 
-        # The skip check must account for the bypass patches too, otherwise editing
-        # bypass.sh can never produce a new image: the n8n version is unchanged, so
-        # the version tag already exists and the build is skipped forever.
         bypass_hash=$(sha256sum bypass.sh | cut -c1-12)
         build_key="${version_number}-b${bypass_hash}"
 
@@ -93,7 +77,7 @@ jobs:
         echo "Build key:  $build_key"
 
     - name: Log in to Container Registry
-      uses: docker/login-action@v4
+      uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
@@ -128,8 +112,19 @@ jobs:
       packages: write
 
     steps:
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+        
     - name: Checkout current repository
-      uses: actions/checkout@v7
+      uses: actions/checkout@v4
 
     - name: Clone n8n repository
       env:
@@ -145,8 +140,6 @@ jobs:
     - name: Copy bypass script to n8n repository
       run: |
         set -euo pipefail
-        # Hard failure: without the bypass, the build would still succeed and
-        # publish a stock n8n image under the `enterprise` tag.
         if [ ! -f bypass.sh ]; then
           echo "::error title=Missing bypass.sh::bypass.sh not found; refusing to publish an unpatched image"
           exit 1
@@ -155,18 +148,13 @@ jobs:
         echo "bypass.sh copied to n8n-source"
 
     - name: Setup Node.js
-      uses: actions/setup-node@v7
+      uses: actions/setup-node@v4
       with:
-        node-version: '24'
+        node-version: '20.18.3'
 
     - name: Install pnpm
-      uses: pnpm/action-setup@v6
+      uses: pnpm/action-setup@v4
       with:
-        # Deliberately NOT `version: latest`. n8n pins `packageManager` (pnpm
-        # 11.25.0 as of n8n@2.39.8) and pnpm 12 made `pnpm deploy` reject
-        # ambiguous peer resolutions (ERR_PNPM_DEPLOY_AMBIGUOUS_PEER), which
-        # breaks the `pnpm run build:docker` step. Reading the version out of
-        # the cloned source keeps us on whatever upstream tests against.
         package_json_file: n8n-source/package.json
 
     - name: Install dependencies
@@ -179,21 +167,16 @@ jobs:
         set -euo pipefail
         sed -i 's/\r$//' bypass.sh
         chmod +x bypass.sh
-        # bypass.sh verifies each patch and exits non-zero if any of them drifted.
         ./bypass.sh --auto
 
     - name: Build n8n
       working-directory: n8n-source
-      run: pnpm run build
-
-    # No setup-buildx-action on purpose. It would create a `docker-container`
-    # driver builder, which sends dockerize-n8n.mjs down the
-    # `docker buildx build --load` path. The runner's default builder uses the
-    # `docker` driver, so the script takes the plain `docker build` path instead
-    # and the image lands in the local daemon for the tag-and-push step below.
+      run: |
+        echo "inject-workspace-packages=true" >> .npmrc
+        pnpm run build
 
     - name: Log in to Container Registry
-      uses: docker/login-action@v4
+      uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
@@ -202,9 +185,6 @@ jobs:
     - name: Build Docker image
       working-directory: n8n-source
       env:
-        # Read by n8n's scripts/dockerize-n8n.mjs. IMAGE_TAG deliberately shadows
-        # the workflow-level `enterprise` value for this step only; the GHCR tags
-        # are applied by the next step.
         CONTAINER_ENGINE: docker
         IMAGE_BASE_NAME: n8nio/n8n
         IMAGE_TAG: build
